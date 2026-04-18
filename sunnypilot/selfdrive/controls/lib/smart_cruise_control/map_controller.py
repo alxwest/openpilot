@@ -26,6 +26,9 @@ TARGET_OFFSET = 1.0  # seconds - This controls how soon before the curve you rea
                      # done to keep the distance calculations consistent but results in the offset actually being less
                      # time than specified depending on how much of a speed differential there is between v_ego and the
                      # target velocity.
+STOCK_ACC_DECEL = 0.75  # m/s^2, conservative assumed stock ACC decel for set-speed-only curve control.
+STOCK_ACC_RESPONSE_TIME = 3.0  # seconds, accounts for virtual button and stock ACC response delay.
+CURVE_DISTANCE_BUFFER = 15.0  # meters, extra buffer before the estimated decel point.
 
 
 def velocities_from_param(param: str, params: Params):
@@ -169,7 +172,11 @@ class SmartCruiseControlMap:
         t = abs((min_accel_v - tv) / TARGET_ACCEL)
         max_d += calculate_distance(t, 0, TARGET_ACCEL, min_accel_v)
 
-      if d < max_d + tv * TARGET_OFFSET:
+      stock_acc_decel_distance = max(0., self.v_ego ** 2 - tv ** 2) / (2. * STOCK_ACC_DECEL)
+      response_distance = self.v_ego * STOCK_ACC_RESPONSE_TIME
+      anticipation_distance = max(max_d, stock_acc_decel_distance) + response_distance + CURVE_DISTANCE_BUFFER + tv * TARGET_OFFSET
+
+      if d < anticipation_distance:
         valid_velocities.append((float(tv), tlat, tlon))
 
     # Find the smallest velocity we need to adjust for
