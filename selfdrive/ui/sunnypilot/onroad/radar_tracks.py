@@ -11,8 +11,9 @@ import pyray as rl
 class RadarTracks:
   def draw_radar_tracks(self, live_tracks, map_to_screen, path_offset_z, track_size=6):
     for track in live_tracks.points:
-      d_rel, y_rel, v_rel, a_rel = track.dRel, track.yRel, track.vRel, track.aRel
-      if not (math.isfinite(d_rel) and math.isfinite(y_rel) and math.isfinite(v_rel) and math.isfinite(a_rel)):
+      d_rel = track.dRel
+      y_rel = track.yRel if math.isfinite(track.yRel) else 0.0
+      if not math.isfinite(d_rel):
         continue
 
       pt = map_to_screen(d_rel, -y_rel, path_offset_z)

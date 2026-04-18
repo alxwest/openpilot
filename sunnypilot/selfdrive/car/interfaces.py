@@ -7,6 +7,7 @@ See the LICENSE.md file in the root directory for more details.
 from typing import Any
 
 from opendbc.car import structs
+from opendbc.car.hyundai.values import CAR as HYUNDAI, HyundaiFlags
 from opendbc.car.interfaces import CarInterfaceBase
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
@@ -92,6 +93,22 @@ def _cleanup_unsupported_params(CP: structs.CarParams, CP_SP: structs.CarParamsS
   set_speed_limit_assist_availability(CP, CP_SP, params)
 
 
+def _initialize_radar_track_visuals(CP: structs.CarParams, params: Params = None) -> None:
+  if params is None:
+    params = Params()
+
+  niro_ev_hda2 = (
+    CP.brand == "hyundai" and
+    CP.carFingerprint == HYUNDAI.KIA_NIRO_EV_2ND_GEN and
+    CP.alphaLongitudinalAvailable and
+    CP.flags & HyundaiFlags.CANFD_LKA_STEER_MSG
+  )
+
+  if niro_ev_hda2:
+    CP.radarUnavailable = False
+    params.put_bool_nonblocking("RadarTracks", True)
+
+
 def setup_interfaces(CI: CarInterfaceBase, params: Params = None) -> None:
   CP = CI.CP
   CP_SP = CI.CP_SP
@@ -100,6 +117,7 @@ def setup_interfaces(CI: CarInterfaceBase, params: Params = None) -> None:
   nnlc_enabled = _initialize_neural_network_lateral_control(CP, CP_SP, params)
   _initialize_intelligent_cruise_button_management(CP, CP_SP, params)
   _initialize_torque_lateral_control(CI, CP, enforce_torque, nnlc_enabled)
+  _initialize_radar_track_visuals(CP, params)
   _cleanup_unsupported_params(CP, CP_SP)
 
   try:
