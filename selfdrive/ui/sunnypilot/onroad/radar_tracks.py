@@ -8,8 +8,22 @@ import math
 import pyray as rl
 
 
+LEAD_TRACK_COLOR = rl.Color(0, 255, 64, 255)
+RADAR_TRACK_COLOR = rl.Color(0, 255, 255, 255)
+
+
 class RadarTracks:
-  def draw_radar_tracks(self, live_tracks, map_to_screen, path_offset_z, track_size=6):
+  @staticmethod
+  def _lead_track_id(radar_state) -> int | None:
+    if radar_state is None or not radar_state.leadOne.status or not radar_state.leadOne.radar:
+      return None
+
+    track_id = radar_state.leadOne.radarTrackId
+    return track_id if track_id >= 0 else None
+
+  def draw_radar_tracks(self, live_tracks, radar_state, map_to_screen, path_offset_z, track_size=6):
+    lead_track_id = self._lead_track_id(radar_state)
+
     for track in live_tracks.points:
       d_rel = track.dRel
       y_rel = track.yRel if math.isfinite(track.yRel) else 0.0
@@ -21,4 +35,5 @@ class RadarTracks:
         continue
 
       x, y = pt
-      rl.draw_circle(int(x), int(y), track_size, rl.Color(0, 255, 64, 255))
+      color = LEAD_TRACK_COLOR if track.trackId == lead_track_id else RADAR_TRACK_COLOR
+      rl.draw_circle(int(x), int(y), track_size, color)
