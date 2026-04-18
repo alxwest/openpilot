@@ -115,6 +115,7 @@ def _initialize_niro_ev_hda2_features(CP: structs.CarParams, CP_SP: structs.CarP
       CP_SP.pcmCruiseSpeed = False
       params.put_bool("IntelligentCruiseButtonManagement", True)
       params.put("SpeedLimitPolicy", int(SpeedLimitPolicy.car_state_only))
+      params.put_bool("SmartCruiseControlVision", True)
 
 
 def setup_interfaces(CI: CarInterfaceBase, params: Params = None) -> None:

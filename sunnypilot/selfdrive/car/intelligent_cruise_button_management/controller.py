@@ -20,6 +20,7 @@ ALLOWED_SPEED_THRESHOLD = 1.8  # m/s, ~4 MPH
 HYST_GAP = 0.0  # currently disabled; TODO-SP: might need to be brand-specific
 INACTIVE_TIMER = 0.4
 V_TARGET_UNSET = 0.0
+CURVE_SOURCES = (LongitudinalPlanSource.sccVision, LongitudinalPlanSource.sccMap)
 
 
 SEND_BUTTONS = {
@@ -46,37 +47,55 @@ class IntelligentCruiseButtonManagement:
     self.is_metric = False
 
     self.cruise_button_timers = CRUISE_BUTTON_TIMER
-    self.speed_limit_target = 0
-    self.speed_limit_target_last = 0
-    self.speed_limit_sync_active = False
+    self.set_speed_target = 0
+    self.set_speed_target_last = 0
+    self.set_speed_sync_active = False
     self.manual_button_pressed = False
 
   @property
   def v_cruise_equal(self) -> bool:
     return self.v_target == self.v_cruise_cluster
 
-  def update_speed_limit_sync(self, LP_SP: custom.LongitudinalPlanSP, speed_conv: float) -> float:
+  def _get_car_speed_limit_target(self, LP_SP: custom.LongitudinalPlanSP, speed_conv: float) -> int:
     resolver = LP_SP.speedLimit.resolver
     speed_limit_valid = resolver.source == SpeedLimitSource.car and resolver.speedLimitValid and resolver.speedLimit > 0.
 
-    if not speed_limit_valid:
-      self.speed_limit_target = 0
-      self.speed_limit_target_last = 0
-      self.speed_limit_sync_active = False
+    if speed_limit_valid:
+      return max(self.v_cruise_min, round(resolver.speedLimit * speed_conv))
+
+    return 0
+
+  def _get_curve_target(self, LP_SP: custom.LongitudinalPlanSP, speed_conv: float) -> int:
+    if LP_SP.longitudinalPlanSource in CURVE_SOURCES and LP_SP.vTarget > 0.:
+      return max(self.v_cruise_min, round(LP_SP.vTarget * speed_conv))
+
+    return 0
+
+  def update_set_speed_sync(self, LP_SP: custom.LongitudinalPlanSP, speed_conv: float) -> float:
+    car_speed_limit_target = self._get_car_speed_limit_target(LP_SP, speed_conv)
+    curve_target = self._get_curve_target(LP_SP, speed_conv)
+
+    if car_speed_limit_target > 0 or curve_target > 0:
+      targets = [target for target in (car_speed_limit_target, curve_target) if target > 0]
+      self.set_speed_target = min(targets)
+    elif LP_SP.vTarget > 0.:
+      self.set_speed_target = max(self.v_cruise_min, round(LP_SP.vTarget * speed_conv))
+    else:
+      self.set_speed_target = 0
+      self.set_speed_target_last = 0
+      self.set_speed_sync_active = False
       return V_TARGET_UNSET
 
-    self.speed_limit_target = max(self.v_cruise_min, round(resolver.speedLimit * speed_conv))
-
     if self.manual_button_pressed:
-      self.speed_limit_sync_active = False
-    elif self.speed_limit_target != self.speed_limit_target_last:
-      self.speed_limit_sync_active = self.speed_limit_target != self.v_cruise_cluster
-    elif self.speed_limit_sync_active and self.speed_limit_target == self.v_cruise_cluster:
-      self.speed_limit_sync_active = False
+      self.set_speed_sync_active = False
+    elif self.set_speed_target != self.set_speed_target_last:
+      self.set_speed_sync_active = self.set_speed_target != self.v_cruise_cluster
+    elif self.set_speed_sync_active and self.set_speed_target == self.v_cruise_cluster:
+      self.set_speed_sync_active = False
 
-    self.speed_limit_target_last = self.speed_limit_target
-    if self.speed_limit_sync_active:
-      return self.speed_limit_target / speed_conv
+    self.set_speed_target_last = self.set_speed_target
+    if self.set_speed_sync_active:
+      return self.set_speed_target / speed_conv
 
     return self.v_cruise_cluster / speed_conv
 
@@ -87,7 +106,7 @@ class IntelligentCruiseButtonManagement:
     self.v_cruise_min = get_minimum_set_speed(self.is_metric)
     self.v_cruise_cluster = round(CS.cruiseState.speedCluster * speed_conv)
 
-    v_target = self.update_speed_limit_sync(LP_SP, speed_conv)
+    v_target = self.update_set_speed_sync(LP_SP, speed_conv)
     if v_target == V_TARGET_UNSET:
       v_target = LP_SP.vTarget
 
