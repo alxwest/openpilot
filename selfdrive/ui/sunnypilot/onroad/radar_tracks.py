@@ -9,7 +9,7 @@ import pyray as rl
 
 
 LEAD_TRACK_COLOR = rl.Color(0, 255, 64, 255)
-RADAR_TRACK_COLOR = rl.Color(0, 255, 255, 255)
+RADAR_TRACK_COLOR = rl.Color(255, 105, 180, 255)
 
 
 class RadarTracks:
