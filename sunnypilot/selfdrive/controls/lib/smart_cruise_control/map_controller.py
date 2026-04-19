@@ -32,6 +32,10 @@ CURVE_DISTANCE_BUFFER = 35.0  # meters, extra buffer before the estimated decel 
 CURVE_EXIT_HOLD_TIME = 1.0  # seconds, keeps the low set-speed target briefly after map confidence drops.
 CURVE_EXIT_HOLD_FRAMES = int(CURVE_EXIT_HOLD_TIME / DT_MDL)
 CURVE_RELEASE_SPEED_MARGIN = 1.8  # m/s, about 4 mph. Allows acceleration once the target speed has been reached.
+OUTSIDE_CURVE_SPEED_FACTOR = 1.08
+MAX_OUTSIDE_CURVE_SPEED_BONUS = 2.0  # m/s, about 4.5 mph.
+MIN_CURVE_DIRECTION_DISTANCE = 10.0
+MIN_CURVE_DIRECTION_SIN = 0.03
 
 
 def velocities_from_param(param: str, params: Params):
@@ -88,7 +92,9 @@ class SmartCruiseControlMap:
     self.v_cruise = 0
     self.target_lat = 0.0
     self.target_lon = 0.0
+    self.target_map_velocity = 0.0
     self.curve_hold_frames = 0
+    self.left_hand_traffic = False
     self.frame = -1
 
     self.last_position = coordinate_from_param("LastGPSPosition", self.mem_params) or Coordinate(0.0, 0.0)
@@ -112,10 +118,11 @@ class SmartCruiseControlMap:
       return False
 
     for target_velocity in forward_points:
+      target_map_velocity = self.target_map_velocity if self.target_map_velocity > 0. else self.v_target
       if (
         target_velocity["latitude"] == self.target_lat and
         target_velocity["longitude"] == self.target_lon and
-        target_velocity["velocity"] == self.v_target
+        target_velocity["velocity"] == target_map_velocity
       ):
         return True
 
@@ -125,7 +132,75 @@ class SmartCruiseControlMap:
     self.v_target = 0.0
     self.target_lat = 0.0
     self.target_lon = 0.0
+    self.target_map_velocity = 0.0
     self.curve_hold_frames = 0
+
+  @staticmethod
+  def _target_point_distance(a: dict, b: dict) -> float:
+    return distance_to_point(
+      a["latitude"] * TO_RADIANS, a["longitude"] * TO_RADIANS,
+      b["latitude"] * TO_RADIANS, b["longitude"] * TO_RADIANS,
+    )
+
+  @staticmethod
+  def _target_point_xy(point: dict, origin: dict) -> tuple[float, float]:
+    origin_lat_rad = origin["latitude"] * TO_RADIANS
+    x = (point["longitude"] - origin["longitude"]) * TO_RADIANS * R * math.cos(origin_lat_rad)
+    y = (point["latitude"] - origin["latitude"]) * TO_RADIANS * R
+    return x, y
+
+  def _curve_reference_index(self, points: list[dict], start_idx: int, step: int) -> int | None:
+    idx = start_idx
+    while 0 <= idx + step < len(points):
+      idx += step
+      if self._target_point_distance(points[start_idx], points[idx]) >= MIN_CURVE_DIRECTION_DISTANCE:
+        return idx
+
+    return idx if idx != start_idx else None
+
+  def _signed_curve_turn(self, forward_points: list[dict], idx: int) -> float:
+    if not forward_points:
+      return 0.0
+
+    current_position = {"latitude": self.last_position.latitude, "longitude": self.last_position.longitude}
+    points = [current_position, *forward_points]
+    center_idx = idx + 1
+    if center_idx >= len(points):
+      return 0.0
+
+    prev_idx = self._curve_reference_index(points, center_idx, -1)
+    next_idx = self._curve_reference_index(points, center_idx, 1)
+    if prev_idx is None or next_idx is None:
+      return 0.0
+
+    center = points[center_idx]
+    p0x, p0y = self._target_point_xy(points[prev_idx], center)
+    p2x, p2y = self._target_point_xy(points[next_idx], center)
+    v1x, v1y = -p0x, -p0y
+    v2x, v2y = p2x, p2y
+    mag1 = math.hypot(v1x, v1y)
+    mag2 = math.hypot(v2x, v2y)
+    if mag1 < 1.0 or mag2 < 1.0:
+      return 0.0
+
+    return (v1x * v2y - v1y * v2x) / (mag1 * mag2)
+
+  def _target_velocity_for_lane_side(self, target_velocity: float, forward_points: list[dict], idx: int) -> float:
+    signed_turn = self._signed_curve_turn(forward_points, idx)
+    if abs(signed_turn) < MIN_CURVE_DIRECTION_SIN:
+      return target_velocity
+
+    turn_is_right = signed_turn < 0.
+    outside_curve = turn_is_right if self.left_hand_traffic else not turn_is_right
+    if not outside_curve:
+      return target_velocity
+
+    speed_bonus = min(
+      target_velocity * (OUTSIDE_CURVE_SPEED_FACTOR - 1.),
+      MAX_OUTSIDE_CURVE_SPEED_BONUS,
+    )
+    adjusted_target = target_velocity + speed_bonus
+    return min(adjusted_target, self.v_cruise) if self.v_cruise > 0. else adjusted_target
 
   def update_calculations(self) -> None:
     self.last_position = coordinate_from_param("LastGPSPosition", self.mem_params) or Coordinate(0.0, 0.0)
@@ -163,7 +238,8 @@ class SmartCruiseControlMap:
       target_velocity = forward_points[i]
       tlat = target_velocity["latitude"]
       tlon = target_velocity["longitude"]
-      tv = target_velocity["velocity"]
+      map_tv = target_velocity["velocity"]
+      tv = self._target_velocity_for_lane_side(map_tv, forward_points, i)
       if tv > self.v_ego and not (recovering_from_curve and tv < self.v_cruise):
         continue
 
@@ -201,20 +277,24 @@ class SmartCruiseControlMap:
 
       stock_acc_decel_distance = max(0., self.v_ego ** 2 - tv ** 2) / (2. * STOCK_ACC_DECEL)
       response_distance = self.v_ego * STOCK_ACC_RESPONSE_TIME
-      anticipation_distance = max(max_d, stock_acc_decel_distance) + response_distance + CURVE_DISTANCE_BUFFER + tv * TARGET_OFFSET
+      anticipation_distance = (
+        max(max_d, stock_acc_decel_distance) + response_distance + CURVE_DISTANCE_BUFFER + tv * TARGET_OFFSET
+      )
 
       if d < anticipation_distance:
-        valid_velocities.append((float(tv), tlat, tlon))
+        valid_velocities.append((float(tv), tlat, tlon, float(map_tv)))
 
     # Find the smallest velocity we need to adjust for
     min_v = 100.0
     target_lat = 0.0
     target_lon = 0.0
-    for tv, lat, lon in valid_velocities:
+    target_map_velocity = 0.0
+    for tv, lat, lon, map_tv in valid_velocities:
       if tv < min_v:
         min_v = tv
         target_lat = lat
         target_lon = lon
+        target_map_velocity = map_tv
 
     has_new_target = min_v < 100.0
     previous_target_still_ahead = self._target_still_ahead(forward_points)
@@ -229,6 +309,7 @@ class SmartCruiseControlMap:
       self.v_target = min_v
       self.target_lat = target_lat
       self.target_lon = target_lon
+      self.target_map_velocity = target_map_velocity
       self.curve_hold_frames = CURVE_EXIT_HOLD_FRAMES
       return
 
@@ -280,12 +361,13 @@ class SmartCruiseControlMap:
 
     return enabled, active
 
-  def update(self, long_enabled: bool, long_override: bool, v_ego, a_ego, v_cruise) -> None:
+  def update(self, long_enabled: bool, long_override: bool, v_ego, a_ego, v_cruise, left_hand_traffic: bool = False) -> None:
     self.long_enabled = long_enabled
     self.long_override = long_override
     self.v_ego = v_ego
     self.a_ego = a_ego
     self.v_cruise = v_cruise
+    self.left_hand_traffic = left_hand_traffic
 
     self.update_params()
     self.update_calculations()
