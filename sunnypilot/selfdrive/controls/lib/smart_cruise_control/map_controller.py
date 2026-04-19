@@ -36,6 +36,24 @@ OUTSIDE_CURVE_SPEED_FACTOR = 1.08
 MAX_OUTSIDE_CURVE_SPEED_BONUS = 2.0  # m/s, about 4.5 mph.
 MIN_CURVE_DIRECTION_DISTANCE = 10.0
 MIN_CURVE_DIRECTION_SIN = 0.03
+LEFT_HAND_TRAFFIC_COUNTRIES = frozenset({
+  "AG", "AI", "AU", "BB", "BD", "BM", "BN", "BS", "BT", "BW", "CK", "CY", "DM", "FJ", "FK", "GB", "GD", "GG",
+  "GY", "HK", "ID", "IE", "IM", "IN", "JE", "JM", "JP", "KE", "KI", "KN", "KY", "LC", "LK", "LS", "MO", "MS",
+  "MT", "MU", "MV", "MW", "MY", "MZ", "NA", "NP", "NR", "NU", "NZ", "PG", "PK", "PN", "SB", "SC", "SG", "SH",
+  "SR", "SZ", "TC", "TH", "TL", "TO", "TT", "TV", "TZ", "UG", "UK", "VC", "VG", "VI", "WS", "ZA", "ZM", "ZW",
+})
+LEFT_HAND_TRAFFIC_COUNTRY_NAMES = frozenset({
+  "united kingdom",
+  "great britain",
+  "england",
+  "scotland",
+  "wales",
+  "northern ireland",
+  "ireland",
+  "japan",
+  "australia",
+  "new zealand",
+})
 
 
 def velocities_from_param(param: str, params: Params):
@@ -95,10 +113,14 @@ class SmartCruiseControlMap:
     self.target_map_velocity = 0.0
     self.curve_hold_frames = 0
     self.left_hand_traffic = False
+    self.left_hand_traffic_fallback = False
+    self.country_left_hand_traffic: bool | None = None
     self.frame = -1
 
     self.last_position = coordinate_from_param("LastGPSPosition", self.mem_params) or Coordinate(0.0, 0.0)
     self.target_velocities = velocities_from_param("MapTargetVelocities", self.mem_params) or []
+    self._update_country_traffic_side()
+    self._update_traffic_side()
 
   def get_v_target_from_control(self) -> float:
     if self.is_active:
@@ -112,6 +134,31 @@ class SmartCruiseControlMap:
   def update_params(self):
     if self.frame % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
       self.enabled = self.params.get_bool("SmartCruiseControlMap")
+      self._update_country_traffic_side()
+
+  @staticmethod
+  def _normalize_country(country: str | None) -> str:
+    return (country or "").strip().upper().replace("-", "_")
+
+  @classmethod
+  def _country_uses_left_hand_traffic(cls, country: str | None) -> bool | None:
+    normalized = cls._normalize_country(country)
+    if not normalized:
+      return None
+    if normalized in LEFT_HAND_TRAFFIC_COUNTRIES:
+      return True
+    if normalized.lower() in LEFT_HAND_TRAFFIC_COUNTRY_NAMES:
+      return True
+    return False
+
+  def _update_country_traffic_side(self) -> None:
+    country = self.params.get("OsmLocationName", return_default=True)
+    self.country_left_hand_traffic = self._country_uses_left_hand_traffic(country)
+
+  def _update_traffic_side(self) -> None:
+    self.left_hand_traffic = (
+      self.left_hand_traffic_fallback if self.country_left_hand_traffic is None else self.country_left_hand_traffic
+    )
 
   def _target_still_ahead(self, forward_points: list[dict]) -> bool:
     if self.v_target <= 0. or self.target_lat == 0. or self.target_lon == 0.:
@@ -361,15 +408,17 @@ class SmartCruiseControlMap:
 
     return enabled, active
 
-  def update(self, long_enabled: bool, long_override: bool, v_ego, a_ego, v_cruise, left_hand_traffic: bool = False) -> None:
+  def update(self, long_enabled: bool, long_override: bool, v_ego, a_ego, v_cruise,
+             left_hand_traffic_fallback: bool = False) -> None:
     self.long_enabled = long_enabled
     self.long_override = long_override
     self.v_ego = v_ego
     self.a_ego = a_ego
     self.v_cruise = v_cruise
-    self.left_hand_traffic = left_hand_traffic
+    self.left_hand_traffic_fallback = left_hand_traffic_fallback
 
     self.update_params()
+    self._update_traffic_side()
     self.update_calculations()
 
     self.is_enabled, self.is_active = self._update_state_machine()

@@ -26,6 +26,7 @@ class TestSmartCruiseControlMap:
 
   def reset_params(self):
     self.params.put_bool("SmartCruiseControlMap", True)
+    self.params.remove("OsmLocationName")
 
     # TODO-SP: mock data from gpsLocation
     self.params.put("LastGPSPosition", "{}")
@@ -131,5 +132,31 @@ class TestSmartCruiseControlMap:
     ]
 
     assert self.scc_m._target_still_ahead(forward_points)
+
+  def test_osm_country_sets_left_hand_traffic(self):
+    self.params.put("OsmLocationName", "GB")
+
+    self.scc_m._update_country_traffic_side()
+    self.scc_m._update_traffic_side()
+
+    assert self.scc_m.left_hand_traffic
+
+  def test_osm_country_overrides_rhd_fallback(self):
+    self.params.put("OsmLocationName", "FR")
+    self.scc_m.left_hand_traffic_fallback = True
+
+    self.scc_m._update_country_traffic_side()
+    self.scc_m._update_traffic_side()
+
+    assert not self.scc_m.left_hand_traffic
+
+  def test_rhd_fallback_used_when_osm_country_is_unset(self):
+    self.params.remove("OsmLocationName")
+    self.scc_m.left_hand_traffic_fallback = True
+
+    self.scc_m._update_country_traffic_side()
+    self.scc_m._update_traffic_side()
+
+    assert self.scc_m.left_hand_traffic
 
   # TODO-SP: mock data from modelV2 to test other states
