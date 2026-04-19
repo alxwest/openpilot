@@ -21,6 +21,9 @@ HYST_GAP = 0.0  # currently disabled; TODO-SP: might need to be brand-specific
 INACTIVE_TIMER = 0.4
 V_TARGET_UNSET = 0.0
 CURVE_SOURCES = (LongitudinalPlanSource.sccVision, LongitudinalPlanSource.sccMap)
+STOCK_ACC_SPEED_LIMIT_DECEL = 0.6  # m/s^2, conservative stock ACC response for virtual-button speed sync.
+STOCK_ACC_SPEED_LIMIT_RESPONSE_TIME = 5.0
+SPEED_LIMIT_AHEAD_DISTANCE_BUFFER = 35.0
 
 
 SEND_BUTTONS = {
@@ -56,12 +59,31 @@ class IntelligentCruiseButtonManagement:
   def v_cruise_equal(self) -> bool:
     return self.v_target == self.v_cruise_cluster
 
-  def _get_car_speed_limit_target(self, LP_SP: custom.LongitudinalPlanSP, speed_conv: float) -> int:
+  def _get_speed_limit_target(self, LP_SP: custom.LongitudinalPlanSP, speed_conv: float) -> int:
     resolver = LP_SP.speedLimit.resolver
-    speed_limit_valid = resolver.source == SpeedLimitSource.car and resolver.speedLimitValid and resolver.speedLimit > 0.
+    speed_limit = resolver.speedLimitFinal if resolver.speedLimitFinal > 0. else resolver.speedLimit
+    speed_limit_valid = resolver.source != SpeedLimitSource.none and resolver.speedLimitValid and speed_limit > 0.
 
     if speed_limit_valid:
-      return max(self.v_cruise_min, round(resolver.speedLimit * speed_conv))
+      return max(self.v_cruise_min, round(speed_limit * speed_conv))
+
+    return 0
+
+  def _get_map_speed_limit_ahead_target(self, CS: car.CarState, live_map_data_sp, speed_conv: float) -> int:
+    if live_map_data_sp is None or not live_map_data_sp.speedLimitAheadValid or live_map_data_sp.speedLimitAhead <= 0.:
+      return 0
+
+    target = max(self.v_cruise_min, round(live_map_data_sp.speedLimitAhead * speed_conv))
+    if target >= self.v_cruise_cluster:
+      return 0
+
+    approach_speed = max(CS.vEgo, self.v_cruise_cluster / speed_conv)
+    decel_distance = max(0., approach_speed ** 2 - live_map_data_sp.speedLimitAhead ** 2) / (2. * STOCK_ACC_SPEED_LIMIT_DECEL)
+    response_distance = approach_speed * STOCK_ACC_SPEED_LIMIT_RESPONSE_TIME
+    anticipation_distance = decel_distance + response_distance + SPEED_LIMIT_AHEAD_DISTANCE_BUFFER
+
+    if live_map_data_sp.speedLimitAheadDistance <= anticipation_distance:
+      return target
 
     return 0
 
@@ -71,12 +93,13 @@ class IntelligentCruiseButtonManagement:
 
     return 0
 
-  def update_set_speed_sync(self, LP_SP: custom.LongitudinalPlanSP, speed_conv: float) -> float:
-    car_speed_limit_target = self._get_car_speed_limit_target(LP_SP, speed_conv)
+  def update_set_speed_sync(self, CS: car.CarState, LP_SP: custom.LongitudinalPlanSP, live_map_data_sp, speed_conv: float) -> float:
+    speed_limit_target = self._get_speed_limit_target(LP_SP, speed_conv)
+    map_speed_limit_ahead_target = self._get_map_speed_limit_ahead_target(CS, live_map_data_sp, speed_conv)
     curve_target = self._get_curve_target(LP_SP, speed_conv)
 
-    if car_speed_limit_target > 0 or curve_target > 0:
-      targets = [target for target in (car_speed_limit_target, curve_target) if target > 0]
+    if speed_limit_target > 0 or map_speed_limit_ahead_target > 0 or curve_target > 0:
+      targets = [target for target in (speed_limit_target, map_speed_limit_ahead_target, curve_target) if target > 0]
       self.set_speed_target = min(targets)
     elif LP_SP.vTarget > 0.:
       self.set_speed_target = max(self.v_cruise_min, round(LP_SP.vTarget * speed_conv))
@@ -99,14 +122,14 @@ class IntelligentCruiseButtonManagement:
 
     return self.v_cruise_cluster / speed_conv
 
-  def update_calculations(self, CS: car.CarState, LP_SP: custom.LongitudinalPlanSP) -> None:
+  def update_calculations(self, CS: car.CarState, LP_SP: custom.LongitudinalPlanSP, live_map_data_sp=None) -> None:
     speed_conv = CV.MS_TO_KPH if self.is_metric else CV.MS_TO_MPH
     ms_conv = CV.KPH_TO_MS if self.is_metric else CV.MPH_TO_MS
 
     self.v_cruise_min = get_minimum_set_speed(self.is_metric)
     self.v_cruise_cluster = round(CS.cruiseState.speedCluster * speed_conv)
 
-    v_target = self.update_set_speed_sync(LP_SP, speed_conv)
+    v_target = self.update_set_speed_sync(CS, LP_SP, live_map_data_sp, speed_conv)
     if v_target == V_TARGET_UNSET:
       v_target = LP_SP.vTarget
 
@@ -167,14 +190,15 @@ class IntelligentCruiseButtonManagement:
 
     self.is_ready = ready and not self.manual_button_pressed
 
-  def run(self, CS: car.CarState, CC: car.CarControl, LP_SP: custom.LongitudinalPlanSP, is_metric: bool) -> None:
+  def run(self, CS: car.CarState, CC: car.CarControl, LP_SP: custom.LongitudinalPlanSP, is_metric: bool,
+          live_map_data_sp=None) -> None:
     if self.CP_SP.pcmCruiseSpeed:
       return
 
     self.is_metric = is_metric
 
     self.update_readiness(CS, CC)
-    self.update_calculations(CS, LP_SP)
+    self.update_calculations(CS, LP_SP, live_map_data_sp)
 
     self.cruise_button = self.update_state_machine()
 

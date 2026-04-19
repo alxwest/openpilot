@@ -114,7 +114,7 @@ def _initialize_niro_ev_hda2_features(CP: structs.CarParams, CP_SP: structs.CarP
     if CP_SP.intelligentCruiseButtonManagementAvailable and not CP.openpilotLongitudinalControl:
       CP_SP.pcmCruiseSpeed = False
       params.put_bool("IntelligentCruiseButtonManagement", True)
-      params.put("SpeedLimitPolicy", int(SpeedLimitPolicy.car_state_only))
+      params.put("SpeedLimitPolicy", int(SpeedLimitPolicy.combined))
       params.put_bool("SmartCruiseControlVision", True)
       params.put_bool("SmartCruiseControlMap", True)
 

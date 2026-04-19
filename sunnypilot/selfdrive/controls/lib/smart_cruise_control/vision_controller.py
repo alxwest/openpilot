@@ -27,7 +27,7 @@ _TURNING_LAT_ACC_TH = 1.6  # Lat Acc threshold to trigger turning state.
 _LEAVING_LAT_ACC_TH = 1.3  # Lat Acc threshold to trigger leaving turn state.
 _FINISH_LAT_ACC_TH = 1.1  # Lat Acc threshold to trigger the end of the turn cycle.
 
-_A_LAT_REG_MAX = 2.  # Maximum lateral acceleration
+_A_LAT_REG_MAX = 1.8  # Maximum lateral acceleration
 
 _NO_OVERSHOOT_TIME_HORIZON = 4.  # s. Time to use for velocity desired based on a_target when not overshooting.
 
@@ -44,9 +44,11 @@ _TURNING_ACC_BP = [1.5, 2.3, 3.]  # absolute value of current lat acc
 _LEAVING_ACC = 0.5  # Conformable acceleration to regain speed while leaving a turn.
 
 _ANTICIPATION_PRED_LAT_ACC_TH = 1.1  # Predicted lat accel threshold used to find the start of an upcoming curve.
-_STOCK_ACC_DECEL = 0.75  # m/s^2, conservative assumed stock ACC decel for set-speed-only curve control.
-_STOCK_ACC_RESPONSE_TIME = 3.0  # seconds, accounts for virtual button and stock ACC response delay.
-_CURVE_DISTANCE_BUFFER = 15.0  # meters, extra buffer before the estimated decel point.
+_STOCK_ACC_DECEL = 0.6  # m/s^2, conservative assumed stock ACC decel for set-speed-only curve control.
+_STOCK_ACC_RESPONSE_TIME = 5.0  # seconds, accounts for virtual button and stock ACC response delay.
+_CURVE_DISTANCE_BUFFER = 35.0  # meters, extra buffer before the estimated decel point.
+_CURVE_EXIT_HOLD_TIME = 2.5  # seconds, keeps the low set-speed target briefly after confidence drops.
+_CURVE_EXIT_HOLD_FRAMES = int(_CURVE_EXIT_HOLD_TIME / DT_MDL)
 _MAX_EXTRA_CURVE_SET_SPEED_REDUCTION = 4.5  # m/s, cap extra temporary set-speed reduction to about 10 mph.
 
 
@@ -74,6 +76,8 @@ class SmartCruiseControlVision:
     self.distance_to_curve = float("inf")
     self.curve_decel_required = False
     self.curve_set_speed_target = V_CRUISE_UNSET
+    self.curve_hold_frames = 0
+    self.curve_hold_v_target = V_CRUISE_UNSET
 
   def get_a_target_from_control(self) -> float:
     return self.a_target
@@ -83,9 +87,47 @@ class SmartCruiseControlVision:
       v_target = max(self.v_target, MIN_V) + self.a_target * _NO_OVERSHOOT_TIME_HORIZON
       if self.curve_decel_required:
         v_target = min(v_target, self.curve_set_speed_target)
+      if self._curve_hold_active:
+        v_target = min(v_target, self.curve_hold_v_target)
       return v_target
 
     return V_CRUISE_UNSET
+
+  @property
+  def _curve_hold_active(self) -> bool:
+    return self.curve_hold_frames > 0 and self.curve_hold_v_target != V_CRUISE_UNSET
+
+  def _reset_curve_hold(self) -> None:
+    self.curve_hold_frames = 0
+    self.curve_hold_v_target = V_CRUISE_UNSET
+
+  def _update_curve_hold(self) -> None:
+    target_speed = max(self.v_target, MIN_V)
+    if self.curve_decel_required:
+      target_speed = min(target_speed, self.curve_set_speed_target)
+
+    already_in_curve_state = self.state in ACTIVE_STATES
+    curve_still_present = (
+      self.curve_decel_required or
+      self.max_pred_lat_acc >= _ENTERING_PRED_LAT_ACC_TH or
+      (already_in_curve_state and self.current_lat_acc >= _FINISH_LAT_ACC_TH) or
+      (already_in_curve_state and self.max_pred_lat_acc >= _ABORT_ENTERING_PRED_LAT_ACC_TH)
+    )
+
+    if curve_still_present and target_speed < V_CRUISE_UNSET:
+      self.curve_hold_frames = _CURVE_EXIT_HOLD_FRAMES
+      if self.curve_hold_v_target == V_CRUISE_UNSET:
+        self.curve_hold_v_target = target_speed
+      else:
+        self.curve_hold_v_target = min(self.curve_hold_v_target, target_speed)
+    elif self.curve_hold_frames > 0:
+      self.curve_hold_frames -= 1
+    else:
+      self.curve_hold_v_target = V_CRUISE_UNSET
+
+    if self._curve_hold_active:
+      self.v_target = min(self.v_target, self.curve_hold_v_target)
+      self.curve_set_speed_target = min(self.curve_set_speed_target, self.curve_hold_v_target)
 
   def _update_params(self) -> None:
     if self.frame % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
@@ -93,6 +135,7 @@ class SmartCruiseControlVision:
 
   def _update_calculations(self, sm: messaging.SubMaster) -> None:
     if not self.long_enabled:
+      self._reset_curve_hold()
       return
     else:
       rate_plan = np.array(np.abs(sm['modelV2'].orientationRate.z))
@@ -104,7 +147,10 @@ class SmartCruiseControlVision:
         self.max_pred_lat_acc = 0.
         self.distance_to_curve = float("inf")
         self.curve_decel_required = False
-        self.curve_set_speed_target = V_CRUISE_UNSET
+        if self._curve_hold_active:
+          self._update_curve_hold()
+        else:
+          self.curve_set_speed_target = V_CRUISE_UNSET
         return
 
       rate_plan = rate_plan[:plan_len]
@@ -117,10 +163,14 @@ class SmartCruiseControlVision:
       predicted_lat_accels = rate_plan * vel_plan
       self.max_pred_lat_acc = np.percentile(predicted_lat_accels, 97)
       if self.max_pred_lat_acc <= 0.:
-        self.v_target = self.v_cruise_setpoint
+        self.v_target = self.curve_hold_v_target if self._curve_hold_active else self.v_cruise_setpoint
         self.distance_to_curve = float("inf")
         self.curve_decel_required = False
-        self.curve_set_speed_target = V_CRUISE_UNSET
+        if self._curve_hold_active:
+          self.curve_set_speed_target = self.curve_hold_v_target
+          self._update_curve_hold()
+        else:
+          self.curve_set_speed_target = V_CRUISE_UNSET
         return
 
       # get the maximum curve based on the current velocity
@@ -130,7 +180,10 @@ class SmartCruiseControlVision:
       # Get the target velocity for the maximum curve
       self.v_target = (_A_LAT_REG_MAX / max_curve) ** 0.5
 
-      curve_indices = np.flatnonzero(predicted_lat_accels >= _ANTICIPATION_PRED_LAT_ACC_TH)
+      curve_indices = (
+        np.flatnonzero(predicted_lat_accels >= _ANTICIPATION_PRED_LAT_ACC_TH)
+        if self.max_pred_lat_acc >= _ENTERING_PRED_LAT_ACC_TH else []
+      )
       self.distance_to_curve = float(position_plan[curve_indices[0]]) if len(curve_indices) else float("inf")
       target_speed = max(self.v_target, MIN_V)
       decel_distance = max(0., self.v_ego ** 2 - target_speed ** 2) / (2. * _STOCK_ACC_DECEL)
@@ -147,6 +200,7 @@ class SmartCruiseControlVision:
         _MAX_EXTRA_CURVE_SET_SPEED_REDUCTION,
       )
       self.curve_set_speed_target = max(MIN_V, target_speed - extra_reduction)
+      self._update_curve_hold()
 
   def _update_state_machine(self) -> tuple[bool, bool]:
     # ENABLED, ENTERING, TURNING, LEAVING, OVERRIDING
@@ -164,7 +218,7 @@ class SmartCruiseControlVision:
           if self.v_ego <= MIN_V:
             pass
           # If significant lateral acceleration is predicted ahead, then move to Entering turn state.
-          elif self.max_pred_lat_acc >= _ENTERING_PRED_LAT_ACC_TH or self.curve_decel_required:
+          elif self.max_pred_lat_acc >= _ENTERING_PRED_LAT_ACC_TH or self.curve_decel_required or self._curve_hold_active:
             self.state = VisionState.entering
 
         # OVERRIDING
@@ -178,7 +232,7 @@ class SmartCruiseControlVision:
           if self.current_lat_acc >= _TURNING_LAT_ACC_TH:
             self.state = VisionState.turning
           # Abort if the predicted lateral acceleration drops
-          elif self.max_pred_lat_acc < _ABORT_ENTERING_PRED_LAT_ACC_TH and not self.curve_decel_required:
+          elif self.max_pred_lat_acc < _ABORT_ENTERING_PRED_LAT_ACC_TH and not self.curve_decel_required and not self._curve_hold_active:
             self.state = VisionState.enabled
 
         # TURNING
@@ -193,7 +247,7 @@ class SmartCruiseControlVision:
           if self.current_lat_acc >= _TURNING_LAT_ACC_TH:
             self.state = VisionState.turning
           # Finish if current lateral acceleration goes below a threshold.
-          elif self.current_lat_acc < _FINISH_LAT_ACC_TH:
+          elif self.current_lat_acc < _FINISH_LAT_ACC_TH and not self._curve_hold_active:
             self.state = VisionState.enabled
 
     # DISABLED

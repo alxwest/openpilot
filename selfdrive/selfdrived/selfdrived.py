@@ -458,7 +458,7 @@ class SelfdriveD(CruiseHelper):
           self.events.add(EventName.personalityChanged)
         self.experimental_mode_switched = False
 
-    self.icbm.run(CS, self.sm['carControl'], self.sm['longitudinalPlanSP'], self.is_metric)
+    self.icbm.run(CS, self.sm['carControl'], self.sm['longitudinalPlanSP'], self.is_metric, self.sm['liveMapDataSP'])
 
   def data_sample(self):
     _car_state = messaging.recv_one(self.car_state_sock)

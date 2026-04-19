@@ -26,9 +26,11 @@ TARGET_OFFSET = 1.0  # seconds - This controls how soon before the curve you rea
                      # done to keep the distance calculations consistent but results in the offset actually being less
                      # time than specified depending on how much of a speed differential there is between v_ego and the
                      # target velocity.
-STOCK_ACC_DECEL = 0.75  # m/s^2, conservative assumed stock ACC decel for set-speed-only curve control.
-STOCK_ACC_RESPONSE_TIME = 3.0  # seconds, accounts for virtual button and stock ACC response delay.
-CURVE_DISTANCE_BUFFER = 15.0  # meters, extra buffer before the estimated decel point.
+STOCK_ACC_DECEL = 0.6  # m/s^2, conservative assumed stock ACC decel for set-speed-only curve control.
+STOCK_ACC_RESPONSE_TIME = 5.0  # seconds, accounts for virtual button and stock ACC response delay.
+CURVE_DISTANCE_BUFFER = 35.0  # meters, extra buffer before the estimated decel point.
+CURVE_EXIT_HOLD_TIME = 2.5  # seconds, keeps the low set-speed target briefly after map confidence drops.
+CURVE_EXIT_HOLD_FRAMES = int(CURVE_EXIT_HOLD_TIME / DT_MDL)
 
 
 def velocities_from_param(param: str, params: Params):
@@ -85,6 +87,7 @@ class SmartCruiseControlMap:
     self.v_cruise = 0
     self.target_lat = 0.0
     self.target_lon = 0.0
+    self.curve_hold_frames = 0
     self.frame = -1
 
     self.last_position = coordinate_from_param("LastGPSPosition", self.mem_params) or Coordinate(0.0, 0.0)
@@ -102,6 +105,26 @@ class SmartCruiseControlMap:
   def update_params(self):
     if self.frame % int(PARAMS_UPDATE_PERIOD / DT_MDL) == 0:
       self.enabled = self.params.get_bool("SmartCruiseControlMap")
+
+  def _target_still_ahead(self, forward_points: list[dict]) -> bool:
+    if self.v_target <= 0. or self.target_lat == 0. or self.target_lon == 0.:
+      return False
+
+    for target_velocity in forward_points:
+      if (
+        target_velocity["latitude"] == self.target_lat and
+        target_velocity["longitude"] == self.target_lon and
+        target_velocity["velocity"] == self.v_target
+      ):
+        return True
+
+    return False
+
+  def _reset_target(self) -> None:
+    self.v_target = 0.0
+    self.target_lat = 0.0
+    self.target_lon = 0.0
+    self.curve_hold_frames = 0
 
   def update_calculations(self) -> None:
     self.last_position = coordinate_from_param("LastGPSPosition", self.mem_params) or Coordinate(0.0, 0.0)
@@ -189,26 +212,28 @@ class SmartCruiseControlMap:
         target_lat = lat
         target_lon = lon
 
-    if self.v_target < min_v and not (self.target_lat == 0 and self.target_lon == 0):
-      for i in range(len(forward_points)):
-        target_velocity = forward_points[i]
-        tlat = target_velocity["latitude"]
-        tlon = target_velocity["longitude"]
-        tv = target_velocity["velocity"]
-        if tv > self.v_ego:
-          continue
+    has_new_target = min_v < 100.0
+    previous_target_still_ahead = self._target_still_ahead(forward_points)
 
-        if tlat == self.target_lat and tlon == self.target_lon and tv == self.v_target:
-          return
+    # Keep a lower active target until the map point has actually passed, even if a later point is less restrictive.
+    if previous_target_still_ahead and (not has_new_target or self.v_target < min_v):
+      self.curve_hold_frames = CURVE_EXIT_HOLD_FRAMES
+      return
 
-      # not found so let's reset
-      self.v_target = 0.0
-      self.target_lat = 0.0
-      self.target_lon = 0.0
+    if has_new_target:
+      self.v_target = min_v
+      self.target_lat = target_lat
+      self.target_lon = target_lon
+      self.curve_hold_frames = CURVE_EXIT_HOLD_FRAMES
+      return
 
-    self.v_target = min_v
-    self.target_lat = target_lat
-    self.target_lon = target_lon
+    # Mapd can briefly drop target velocity points at intersections or road-name changes. Hold the previous target
+    # for a short grace period so ICBM does not immediately raise the stock ACC set speed mid-corner.
+    if self.v_target > 0. and self.curve_hold_frames > 0:
+      self.curve_hold_frames -= 1
+      return
+
+    self._reset_target()
 
   def _update_state_machine(self) -> tuple[bool, bool]:
     # ENABLED, TURNING
@@ -226,7 +251,7 @@ class SmartCruiseControlMap:
 
         # TURNING
         elif self.state == MapState.turning:
-          if self.v_cruise <= self.v_target or self.v_target == 0:
+          if self.v_target == 0:
             self.state = MapState.enabled
 
         # OVERRIDING
