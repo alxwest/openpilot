@@ -29,8 +29,9 @@ TARGET_OFFSET = 1.0  # seconds - This controls how soon before the curve you rea
 STOCK_ACC_DECEL = 0.6  # m/s^2, conservative assumed stock ACC decel for set-speed-only curve control.
 STOCK_ACC_RESPONSE_TIME = 5.0  # seconds, accounts for virtual button and stock ACC response delay.
 CURVE_DISTANCE_BUFFER = 35.0  # meters, extra buffer before the estimated decel point.
-CURVE_EXIT_HOLD_TIME = 2.5  # seconds, keeps the low set-speed target briefly after map confidence drops.
+CURVE_EXIT_HOLD_TIME = 1.0  # seconds, keeps the low set-speed target briefly after map confidence drops.
 CURVE_EXIT_HOLD_FRAMES = int(CURVE_EXIT_HOLD_TIME / DT_MDL)
+CURVE_RELEASE_SPEED_MARGIN = 1.8  # m/s, about 4 mph. Allows acceleration once the target speed has been reached.
 
 
 def velocities_from_param(param: str, params: Params):
@@ -157,12 +158,13 @@ class SmartCruiseControlMap:
 
     # find velocities that we are within the distance we need to adjust for
     valid_velocities = []
+    recovering_from_curve = self.v_target > 0. and self.v_ego <= self.v_target + CURVE_RELEASE_SPEED_MARGIN
     for i in range(len(forward_points)):
       target_velocity = forward_points[i]
       tlat = target_velocity["latitude"]
       tlon = target_velocity["longitude"]
       tv = target_velocity["velocity"]
-      if tv > self.v_ego:
+      if tv > self.v_ego and not (recovering_from_curve and tv < self.v_cruise):
         continue
 
       d = forward_distances[i]
@@ -172,7 +174,9 @@ class SmartCruiseControlMap:
       min_accel_v = calculate_velocity(accel_t, TARGET_JERK, self.a_ego, self.v_ego)
 
       max_d = 0
-      if tv > min_accel_v:
+      if tv > self.v_ego:
+        max_d = 0
+      elif tv > min_accel_v:
         # calculate time needed based on target jerk
         a = 0.5 * TARGET_JERK
         b = self.a_ego
@@ -214,9 +218,10 @@ class SmartCruiseControlMap:
 
     has_new_target = min_v < 100.0
     previous_target_still_ahead = self._target_still_ahead(forward_points)
+    near_target_speed = self.v_target > 0. and self.v_ego <= self.v_target + CURVE_RELEASE_SPEED_MARGIN
 
     # Keep a lower active target until the map point has actually passed, even if a later point is less restrictive.
-    if previous_target_still_ahead and (not has_new_target or self.v_target < min_v):
+    if previous_target_still_ahead and not near_target_speed and (not has_new_target or self.v_target < min_v):
       self.curve_hold_frames = CURVE_EXIT_HOLD_FRAMES
       return
 
@@ -246,18 +251,18 @@ class SmartCruiseControlMap:
       else:
         # ENABLED
         if self.state == MapState.enabled:
-          if self.v_cruise > self.v_target != 0:
+          if self.v_cruise > self.v_target != 0 and self.v_ego > self.v_target + CURVE_RELEASE_SPEED_MARGIN:
             self.state = MapState.turning
 
         # TURNING
         elif self.state == MapState.turning:
-          if self.v_target == 0:
+          if self.v_target == 0 or self.v_ego <= self.v_target + CURVE_RELEASE_SPEED_MARGIN:
             self.state = MapState.enabled
 
         # OVERRIDING
         elif self.state == MapState.overriding:
           if not self.long_override:
-            if self.v_cruise > self.v_target != 0:
+            if self.v_cruise > self.v_target != 0 and self.v_ego > self.v_target + CURVE_RELEASE_SPEED_MARGIN:
               self.state = MapState.turning
             else:
               self.state = MapState.enabled

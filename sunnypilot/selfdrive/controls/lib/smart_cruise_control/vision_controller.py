@@ -27,7 +27,7 @@ _TURNING_LAT_ACC_TH = 1.6  # Lat Acc threshold to trigger turning state.
 _LEAVING_LAT_ACC_TH = 1.3  # Lat Acc threshold to trigger leaving turn state.
 _FINISH_LAT_ACC_TH = 1.1  # Lat Acc threshold to trigger the end of the turn cycle.
 
-_A_LAT_REG_MAX = 1.8  # Maximum lateral acceleration
+_A_LAT_REG_MAX = 2.0  # Maximum lateral acceleration
 
 _NO_OVERSHOOT_TIME_HORIZON = 4.  # s. Time to use for velocity desired based on a_target when not overshooting.
 
@@ -47,9 +47,9 @@ _ANTICIPATION_PRED_LAT_ACC_TH = 1.1  # Predicted lat accel threshold used to fin
 _STOCK_ACC_DECEL = 0.6  # m/s^2, conservative assumed stock ACC decel for set-speed-only curve control.
 _STOCK_ACC_RESPONSE_TIME = 5.0  # seconds, accounts for virtual button and stock ACC response delay.
 _CURVE_DISTANCE_BUFFER = 35.0  # meters, extra buffer before the estimated decel point.
-_CURVE_EXIT_HOLD_TIME = 2.5  # seconds, keeps the low set-speed target briefly after confidence drops.
+_CURVE_EXIT_HOLD_TIME = 1.0  # seconds, keeps the low set-speed target briefly after confidence drops.
 _CURVE_EXIT_HOLD_FRAMES = int(_CURVE_EXIT_HOLD_TIME / DT_MDL)
-_MAX_EXTRA_CURVE_SET_SPEED_REDUCTION = 4.5  # m/s, cap extra temporary set-speed reduction to about 10 mph.
+_MAX_EXTRA_CURVE_SET_SPEED_REDUCTION = 3.0  # m/s, cap extra temporary set-speed reduction to about 7 mph.
 
 
 class SmartCruiseControlVision:
@@ -85,9 +85,9 @@ class SmartCruiseControlVision:
   def get_v_target_from_control(self) -> float:
     if self.is_active:
       v_target = max(self.v_target, MIN_V) + self.a_target * _NO_OVERSHOOT_TIME_HORIZON
-      if self.curve_decel_required:
+      if self.curve_decel_required and self.state != VisionState.leaving:
         v_target = min(v_target, self.curve_set_speed_target)
-      if self._curve_hold_active:
+      if self._curve_hold_active and self.state != VisionState.leaving:
         v_target = min(v_target, self.curve_hold_v_target)
       return v_target
 
@@ -102,6 +102,10 @@ class SmartCruiseControlVision:
     self.curve_hold_v_target = V_CRUISE_UNSET
 
   def _update_curve_hold(self) -> None:
+    if self.state == VisionState.leaving:
+      self._reset_curve_hold()
+      return
+
     target_speed = max(self.v_target, MIN_V)
     if self.curve_decel_required:
       target_speed = min(target_speed, self.curve_set_speed_target)
@@ -239,6 +243,7 @@ class SmartCruiseControlVision:
         elif self.state == VisionState.turning:
           # Transition to Leaving if current lateral acceleration drops below a threshold.
           if self.current_lat_acc <= _LEAVING_LAT_ACC_TH:
+            self._reset_curve_hold()
             self.state = VisionState.leaving
 
         # LEAVING
@@ -247,7 +252,7 @@ class SmartCruiseControlVision:
           if self.current_lat_acc >= _TURNING_LAT_ACC_TH:
             self.state = VisionState.turning
           # Finish if current lateral acceleration goes below a threshold.
-          elif self.current_lat_acc < _FINISH_LAT_ACC_TH and not self._curve_hold_active:
+          elif self.current_lat_acc < _FINISH_LAT_ACC_TH:
             self.state = VisionState.enabled
 
     # DISABLED

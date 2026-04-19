@@ -55,4 +55,43 @@ class TestSmartCruiseControlMap:
       self.scc_m.update(True, False, 0., 0., 0.)
     assert self.scc_m.state == VisionState.enabled
 
+  def test_enabled_does_not_enter_curve_when_speed_is_near_target(self):
+    self.scc_m.state = MapState.enabled
+    self.scc_m.long_enabled = True
+    self.scc_m.enabled = True
+    self.scc_m.long_override = False
+    self.scc_m.v_target = 20.0
+    self.scc_m.v_ego = 21.0
+    self.scc_m.v_cruise = 30.0
+
+    self.scc_m._update_state_machine()
+
+    assert self.scc_m.state == MapState.enabled
+
+  def test_turning_exits_when_speed_has_reached_curve_target(self):
+    self.scc_m.state = MapState.turning
+    self.scc_m.long_enabled = True
+    self.scc_m.enabled = True
+    self.scc_m.long_override = False
+    self.scc_m.v_target = 20.0
+    self.scc_m.v_ego = 21.0
+    self.scc_m.v_cruise = 30.0
+
+    self.scc_m._update_state_machine()
+
+    assert self.scc_m.state == MapState.enabled
+
+  def test_turning_stays_active_when_speed_is_above_curve_target(self):
+    self.scc_m.state = MapState.turning
+    self.scc_m.long_enabled = True
+    self.scc_m.enabled = True
+    self.scc_m.long_override = False
+    self.scc_m.v_target = 20.0
+    self.scc_m.v_ego = 22.0
+    self.scc_m.v_cruise = 30.0
+
+    self.scc_m._update_state_machine()
+
+    assert self.scc_m.state == MapState.turning
+
   # TODO-SP: mock data from modelV2 to test other states
