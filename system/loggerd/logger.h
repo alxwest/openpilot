@@ -21,6 +21,7 @@ public:
   void write(uint8_t* data, size_t size, bool in_qlog);
   inline int segment() const { return part; }
   inline const std::string& segmentPath() const { return segment_path; }
+  inline std::string segmentPath(int segment) const { return route_path + "--" + std::to_string(segment); }
   inline const std::string& routeName() const { return route_name; }
   inline void write(kj::ArrayPtr<kj::byte> bytes, bool in_qlog) { write(bytes.begin(), bytes.size(), in_qlog); }
   inline void setExitSignal(int signal) { exit_signal = signal; }

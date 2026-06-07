@@ -27,6 +27,8 @@ const int SEGMENT_LENGTH = LOGGERD_TEST ? atoi(getenv("LOGGERD_SEGMENT_LENGTH"))
 
 constexpr char PRESERVE_ATTR_NAME[] = "user.preserve";
 constexpr char PRESERVE_ATTR_VALUE = '1';
+constexpr char SKIP_UPLOAD_ATTR_NAME[] = "user.skip_upload";
+constexpr char SKIP_UPLOAD_ATTR_VALUE = '1';
 
 struct EncoderSettings {
   cereal::EncodeIndex::Type encode_type;

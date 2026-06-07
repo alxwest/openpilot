@@ -1,9 +1,13 @@
 #include <sys/xattr.h>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/params.h"
@@ -19,13 +23,98 @@ struct LoggerdState {
   std::atomic<int> ready_to_rotate{0};  // count of encoders ready to rotate
   int max_waiting = 0;
   double last_rotate_tms = 0.;      // last rotate time in ms
+  std::unordered_set<int> preserved_segments;
+  int preserve_through_segment = -1;
+  bool route_marked_for_upload = false;
+  bool started = !Params().getBool("IsOffroad");
+  bool accel_baseline_valid = false;
+  std::array<float, 3> accel_baseline = {};
+  double last_bump_tms = 0.0;
 };
+
+constexpr float PARKED_BUMP_ACCEL_THRESHOLD = 7.5f;
+constexpr float PARKED_BUMP_BASELINE_ALPHA = 0.01f;
+constexpr double PARKED_BUMP_DEBOUNCE_TMS = 5000.0;
+
+bool parking_mode_enabled() {
+  return LOGGERD_TEST || Hardware::get_device_type() == cereal::InitData::DeviceType::TIZI;
+}
+
+bool set_segment_xattr(const std::string &segment_path, const char *attr_name, const char attr_value) {
+#ifdef __APPLE__
+  int ret = setxattr(segment_path.c_str(), attr_name, &attr_value, 1, 0, 0);
+#else
+  int ret = setxattr(segment_path.c_str(), attr_name, &attr_value, 1, 0);
+#endif
+  if (ret) {
+    LOGE("setxattr %s failed for %s: %s", attr_name, segment_path.c_str(), strerror(errno));
+    return false;
+  }
+  return true;
+}
+
+void remove_segment_xattr(const std::string &segment_path, const char *attr_name) {
+#ifdef __APPLE__
+  int ret = removexattr(segment_path.c_str(), attr_name, 0);
+#else
+  int ret = removexattr(segment_path.c_str(), attr_name);
+#endif
+  if (ret && errno != ENODATA
+#ifdef ENOATTR
+      && errno != ENOATTR
+#endif
+    ) {
+    LOGE("removexattr %s failed for %s: %s", attr_name, segment_path.c_str(), strerror(errno));
+  }
+}
+
+void mark_segment_local_only(LoggerdState *s, int segment) {
+  if (segment < 0) return;
+
+  const std::string segment_path = s->logger.segmentPath(segment);
+  if (!util::file_exists(segment_path)) return;
+  set_segment_xattr(segment_path, SKIP_UPLOAD_ATTR_NAME, SKIP_UPLOAD_ATTR_VALUE);
+}
+
+void mark_route_for_upload(LoggerdState *s) {
+  if (s->route_marked_for_upload) return;
+
+  Params params;
+  std::string routes = params.get("AthenadRecentlyViewedRoutes");
+  params.put("AthenadRecentlyViewedRoutes", routes + "," + s->logger.routeName());
+  s->route_marked_for_upload = true;
+}
+
+void preserve_segment(LoggerdState *s, int segment) {
+  if (segment < 0 || !s->preserved_segments.insert(segment).second) return;
+
+  const std::string segment_path = s->logger.segmentPath(segment);
+  if (!util::file_exists(segment_path)) {
+    s->preserved_segments.erase(segment);
+    return;
+  }
+
+  LOGW("preserving %s", segment_path.c_str());
+  remove_segment_xattr(segment_path, SKIP_UPLOAD_ATTR_NAME);
+  if (!set_segment_xattr(segment_path, PRESERVE_ATTR_NAME, PRESERVE_ATTR_VALUE)) {
+    s->preserved_segments.erase(segment);
+    return;
+  }
+
+  mark_route_for_upload(s);
+}
 
 void logger_rotate(LoggerdState *s) {
   bool ret =s->logger.next();
   assert(ret);
   s->ready_to_rotate = 0;
   s->last_rotate_tms = millis_since_boot();
+  if (!s->started) {
+    mark_segment_local_only(s, s->logger.segment());
+  }
+  if (s->logger.segment() <= s->preserve_through_segment) {
+    preserve_segment(s, s->logger.segment());
+  }
   LOGW((s->logger.segment() == 0) ? "logging to %s" : "rotated to %s", s->logger.segmentPath().c_str());
 }
 
@@ -195,26 +284,52 @@ int handle_encoder_msg(LoggerdState *s, Message *msg, std::string &name, struct 
 }
 
 void handle_preserve_segment(LoggerdState *s) {
-  static int prev_segment = -1;
-  if (s->logger.segment() == prev_segment) return;
+  preserve_segment(s, s->logger.segment());
+}
 
-  LOGW("preserving %s", s->logger.segmentPath().c_str());
+void handle_device_state(LoggerdState *s, cereal::Event::Reader event) {
+  if (!parking_mode_enabled()) return;
 
-#ifdef __APPLE__
-  int ret = setxattr(s->logger.segmentPath().c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0, 0);
-#else
-  int ret = setxattr(s->logger.segmentPath().c_str(), PRESERVE_ATTR_NAME, &PRESERVE_ATTR_VALUE, 1, 0);
-#endif
-  if (ret) {
-    LOGE("setxattr %s failed for %s: %s", PRESERVE_ATTR_NAME, s->logger.segmentPath().c_str(), strerror(errno));
+  const bool started = event.getDeviceState().getStarted();
+  if (started != s->started) {
+    s->started = started;
+    s->accel_baseline_valid = false;
+    if (!s->started) {
+      mark_segment_local_only(s, s->logger.segment());
+    }
+  }
+}
+
+void handle_accelerometer(LoggerdState *s, cereal::Event::Reader event) {
+  if (!parking_mode_enabled() || s->started) return;
+
+  auto v = event.getAccelerometer().getAcceleration().getV();
+  if (v.size() < 3) return;
+
+  const std::array<float, 3> sample = {v[0], v[1], v[2]};
+  if (!s->accel_baseline_valid) {
+    s->accel_baseline = sample;
+    s->accel_baseline_valid = true;
+    return;
   }
 
-  // mark route for uploading
-  Params params;
-  std::string routes = params.get("AthenadRecentlyViewedRoutes");
-  params.put("AthenadRecentlyViewedRoutes", routes + "," + s->logger.routeName());
+  const float dx = sample[0] - s->accel_baseline[0];
+  const float dy = sample[1] - s->accel_baseline[1];
+  const float dz = sample[2] - s->accel_baseline[2];
+  const float delta = std::sqrt((dx * dx) + (dy * dy) + (dz * dz));
 
-  prev_segment = s->logger.segment();
+  const double tms = millis_since_boot();
+  if ((delta >= PARKED_BUMP_ACCEL_THRESHOLD) && ((tms - s->last_bump_tms) >= PARKED_BUMP_DEBOUNCE_TMS)) {
+    LOGW("parked bump detected on segment %d (delta %.2f m/s^2)", s->logger.segment(), delta);
+    preserve_segment(s, s->logger.segment() - 1);
+    preserve_segment(s, s->logger.segment());
+    s->preserve_through_segment = std::max(s->preserve_through_segment, s->logger.segment() + 1);
+    s->last_bump_tms = tms;
+  }
+
+  for (int i = 0; i < 3; ++i) {
+    s->accel_baseline[i] = (PARKED_BUMP_BASELINE_ALPHA * sample[i]) + ((1.0f - PARKED_BUMP_BASELINE_ALPHA) * s->accel_baseline[i]);
+  }
 }
 
 void loggerd_thread() {
@@ -308,6 +423,16 @@ void loggerd_thread() {
           s.last_camera_seen_tms = millis_since_boot();
           bytes_count += handle_encoder_msg(&s, msg, service.name, remote_encoders[sock], encoder_infos_dict[service.name]);
         } else {
+          if (parking_mode_enabled() && (service.name == "deviceState" || service.name == "accelerometer")) {
+            capnp::FlatArrayMessageReader cmsg(kj::ArrayPtr<capnp::word>((capnp::word *)msg->getData(), msg->getSize() / sizeof(capnp::word)));
+            auto event = cmsg.getRoot<cereal::Event>();
+            if (service.name == "deviceState") {
+              handle_device_state(&s, event);
+            } else {
+              handle_accelerometer(&s, event);
+            }
+          }
+
           s.logger.write((uint8_t *)msg->getData(), msg->getSize(), in_qlog);
           bytes_count += msg->getSize();
           delete msg;

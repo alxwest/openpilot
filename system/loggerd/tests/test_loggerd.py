@@ -19,6 +19,7 @@ from openpilot.system.hardware.hw import Paths
 from openpilot.system.hardware import TICI
 from openpilot.system.loggerd.xattr_cache import getxattr
 from openpilot.system.loggerd.deleter import PRESERVE_ATTR_NAME, PRESERVE_ATTR_VALUE
+from openpilot.system.loggerd.uploader import SKIP_UPLOAD_ATTR_NAME, SKIP_UPLOAD_ATTR_VALUE
 from openpilot.system.manager.process_config import managed_processes
 from openpilot.system.version import get_version
 from openpilot.tools.lib.helpers import RE
@@ -97,7 +98,7 @@ class TestLoggerd:
 
     return sent_msgs
 
-  def _publish_camera_and_audio_messages(self, num_segs=1, segment_length=5):
+  def _publish_camera_and_audio_messages(self, num_segs=1, segment_length=5, bump_segment=None, started=True):
     # Use small frame sizes for testing (width, height, size, stride, uv_offset)
     # NV12 format: size = stride * height * 1.5, uv_offset = stride * height
     w, h = 320, 240
@@ -109,7 +110,7 @@ class TestLoggerd:
     ]
 
     sm = messaging.SubMaster(["roadEncodeData"])
-    pm = messaging.PubMaster([s for _, _, s in streams] + ["rawAudioData"])
+    pm = messaging.PubMaster([s for _, _, s in streams] + ["rawAudioData", "deviceState", "accelerometer"])
     vipc_server = VisionIpcServer("camerad")
     for stream_type, frame_spec, _ in streams:
       vipc_server.create_buffers_with_sizes(stream_type, 40, *(frame_spec))
@@ -120,8 +121,11 @@ class TestLoggerd:
     managed_processes["loggerd"].start()
     managed_processes["encoderd"].start()
     assert pm.wait_for_readers_to_update("roadCameraState", timeout=5)
+    assert pm.wait_for_readers_to_update("deviceState", timeout=5)
+    assert pm.wait_for_readers_to_update("accelerometer", timeout=5)
 
     fps = 20
+    bump_frame = None if bump_segment is None else (bump_segment * segment_length * fps) + fps
     for n in range(1, int(num_segs * segment_length * fps) + 1):
       # send video
       for stream_type, frame_spec, state in streams:
@@ -138,6 +142,16 @@ class TestLoggerd:
       msg.rawAudioData.data = bytes(800 * 2) # 800 samples of int16
       msg.rawAudioData.sampleRate = 16000
       pm.send('rawAudioData', msg)
+
+      device_state = messaging.new_message('deviceState')
+      device_state.deviceState.started = started
+      pm.send('deviceState', device_state)
+
+      accel = messaging.new_message('accelerometer')
+      accel.accelerometer.acceleration.v = [0.0, 0.0, 9.81]
+      if bump_frame is not None and n == bump_frame:
+        accel.accelerometer.acceleration.v = [12.0, 0.0, 9.81]
+      pm.send('accelerometer', accel)
 
       for _, _, state in streams:
         assert pm.wait_for_readers_to_update(state, timeout=5, dt=0.001)
@@ -304,6 +318,27 @@ class TestLoggerd:
 
     segment_dir = self._get_latest_log_dir()
     assert getxattr(segment_dir, PRESERVE_ATTR_NAME) is None
+
+  @pytest.mark.xdist_group("camera_encoder_tests")
+  def test_offroad_segments_are_local_only(self):
+    Params().put("RecordFront", True)
+
+    self._publish_camera_and_audio_messages(num_segs=1, segment_length=4, started=False)
+
+    segment_dir = self._get_latest_log_dir()
+    assert getxattr(segment_dir, SKIP_UPLOAD_ATTR_NAME) == SKIP_UPLOAD_ATTR_VALUE
+
+  @pytest.mark.xdist_group("camera_encoder_tests")
+  def test_preserving_parked_bump_window(self):
+    Params().put("RecordFront", True)
+
+    self._publish_camera_and_audio_messages(num_segs=3, segment_length=4, bump_segment=1, started=False)
+
+    route_path = str(self._get_latest_log_dir()).rsplit("--", 1)[0]
+    for segment in range(3):
+      segment_dir = Path(f"{route_path}--{segment}")
+      assert getxattr(segment_dir, PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
+      assert getxattr(segment_dir, SKIP_UPLOAD_ATTR_NAME) is None
 
   @pytest.mark.xdist_group("camera_encoder_tests")  # setting xdist group ensures tests are run in same worker, prevents encoderd from crashing
   @pytest.mark.parametrize("record_front", [True, False])

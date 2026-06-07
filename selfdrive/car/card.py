@@ -72,6 +72,7 @@ class Car:
     self.CC_prev = car.CarControl.new_message()
     self.CS_prev = car.CarState.new_message()
     self.initialized_prev = False
+    self.parked_recording_prev = False
 
     self.last_actuators_output = structs.CarControl.Actuators()
 
@@ -214,6 +215,11 @@ class Car:
     cs_send.carState.canErrorCounter = self.can_rcv_cum_timeout_counter
     cs_send.carState.cumLagMs = -self.rk.remaining * 1000.
     self.pm.send('carState', cs_send)
+
+    parked_recording = CS.gearShifter == car.CarState.GearShifter.park
+    if parked_recording != self.parked_recording_prev:
+      self.params.put_bool_nonblocking("ParkedRecording", parked_recording)
+      self.parked_recording_prev = parked_recording
 
     if RD is not None:
       tracks_msg = messaging.new_message('liveTracks')

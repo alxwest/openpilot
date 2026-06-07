@@ -22,6 +22,8 @@ from openpilot.common.swaglog import cloudlog
 NetworkType = log.DeviceState.NetworkType
 UPLOAD_ATTR_NAME = 'user.upload'
 UPLOAD_ATTR_VALUE = b'1'
+SKIP_UPLOAD_ATTR_NAME = 'user.skip_upload'
+SKIP_UPLOAD_ATTR_VALUE = b'1'
 
 MAX_UPLOAD_SIZES = {
   "qlog": 25*1e6,  # can't be too restrictive here since we use qlogs to find
@@ -108,11 +110,12 @@ class Uploader:
         try:
           ctime = os.path.getctime(fn)
           is_uploaded = getxattr(fn, UPLOAD_ATTR_NAME) == UPLOAD_ATTR_VALUE
+          skip_upload = getxattr(path, SKIP_UPLOAD_ATTR_NAME) == SKIP_UPLOAD_ATTR_VALUE
         except OSError:
           cloudlog.event("uploader_getxattr_failed", key=key, fn=fn)
           # deleter could have deleted, so skip
           continue
-        if is_uploaded:
+        if is_uploaded or skip_upload:
           continue
 
         # limit uploading on metered connections

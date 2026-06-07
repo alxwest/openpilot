@@ -4,13 +4,13 @@ import platform
 
 from cereal import car
 from openpilot.common.params import Params
-from openpilot.system.hardware import PC, TICI
+from openpilot.system.hardware import HARDWARE, PC, TICI
 from openpilot.system.manager.process import PythonProcess, NativeProcess, DaemonProcess
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
-  return started or params.get_bool("IsDriverViewEnabled")
+  return started or params.get_bool("IsDriverViewEnabled") or parked_recording(started, params, CP)
 
 def notcar(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and CP.notCar
@@ -20,7 +20,10 @@ def iscar(started: bool, params: Params, CP: car.CarParams) -> bool:
 
 def logging(started: bool, params: Params, CP: car.CarParams) -> bool:
   run = (not CP.notCar) or not params.get_bool("DisableLogging")
-  return started and run
+  return (started or parked_recording(started, params, CP)) and run
+
+def parked_recording(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return (not started) and TICI and HARDWARE.get_device_type() == "tizi" and params.get_bool("ParkedRecording")
 
 def ublox_available() -> bool:
   return os.path.exists('/dev/ttyHS0') and not os.path.exists('/persist/comma/use-quectel-gps')
@@ -52,6 +55,9 @@ def always_run(started: bool, params: Params, CP: car.CarParams) -> bool:
 def only_onroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started
 
+def onroad_or_parked_recording(started: bool, params: Params, CP: car.CarParams) -> bool:
+  return started or parked_recording(started, params, CP)
+
 def only_offroad(started: bool, params: Params, CP: car.CarParams) -> bool:
   return not started
 
@@ -65,7 +71,7 @@ procs = [
   DaemonProcess("manage_athenad", "system.athena.manage_athenad", "AthenadPid"),
 
   NativeProcess("loggerd", "system/loggerd", ["./loggerd"], logging),
-  NativeProcess("encoderd", "system/loggerd", ["./encoderd"], only_onroad),
+  NativeProcess("encoderd", "system/loggerd", ["./encoderd"], onroad_or_parked_recording),
   NativeProcess("stream_encoderd", "system/loggerd", ["./encoderd", "--stream"], notcar),
   PythonProcess("logmessaged", "system.logmessaged", always_run),
 
@@ -79,7 +85,7 @@ procs = [
   PythonProcess("modeld", "selfdrive.modeld.modeld", only_onroad),
   PythonProcess("dmonitoringmodeld", "selfdrive.modeld.dmonitoringmodeld", driverview, enabled=(WEBCAM or not PC)),
 
-  PythonProcess("sensord", "system.sensord.sensord", only_onroad, enabled=not PC),
+  PythonProcess("sensord", "system.sensord.sensord", onroad_or_parked_recording, enabled=not PC),
   PythonProcess("ui", "selfdrive.ui.ui", always_run, restart_if_crash=True),
   PythonProcess("soundd", "selfdrive.ui.soundd", driverview),
   PythonProcess("locationd", "selfdrive.locationd.locationd", only_onroad),

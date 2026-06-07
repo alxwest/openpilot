@@ -15,11 +15,16 @@ DELETE_LAST = ['boot', 'crash']
 
 PRESERVE_ATTR_NAME = 'user.preserve'
 PRESERVE_ATTR_VALUE = b'1'
+SKIP_UPLOAD_ATTR_NAME = 'user.skip_upload'
+SKIP_UPLOAD_ATTR_VALUE = b'1'
 PRESERVE_COUNT = 5
 
 
 def has_preserve_xattr(d: str) -> bool:
   return getxattr(os.path.join(Paths.log_root(), d), PRESERVE_ATTR_NAME) == PRESERVE_ATTR_VALUE
+
+def has_skip_upload_xattr(d: str) -> bool:
+  return getxattr(os.path.join(Paths.log_root(), d), SKIP_UPLOAD_ATTR_NAME) == SKIP_UPLOAD_ATTR_VALUE
 
 
 def get_preserved_segments(dirs_by_creation: list[str]) -> set[str]:
@@ -55,7 +60,7 @@ def deleter_thread(exit_event: threading.Event):
       preserved_dirs = get_preserved_segments(dirs)
 
       # remove the earliest directory we can
-      for delete_dir in sorted(dirs, key=lambda d: (d in DELETE_LAST, d in preserved_dirs)):
+      for delete_dir in sorted(dirs, key=lambda d: (d in DELETE_LAST, d in preserved_dirs, not has_skip_upload_xattr(d))):
         delete_path = os.path.join(Paths.log_root(), delete_dir)
 
         if any(name.endswith(".lock") for name in os.listdir(delete_path)):
